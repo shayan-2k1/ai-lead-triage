@@ -754,6 +754,10 @@ th {
 }
 
 /* ---------- auth ---------- */
+.boot p {
+  max-width: 60ch;
+  line-height: 1.6;
+}
 .boot {
   min-height: 100vh;
   display: grid;

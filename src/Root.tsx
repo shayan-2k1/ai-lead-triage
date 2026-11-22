@@ -12,10 +12,11 @@ function openOnce() {
 }
 
 export default function Root() {
-  const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [phase, setPhase] = useState<'loading' | 'ready' | 'error' | 'insecure'>(window.isSecureContext ? 'loading' : 'insecure')
   const [user, setUser] = useState<User | null>(null)
 
   useEffect(() => {
+    if (!window.isSecureContext) return
     openOnce()
       .then(() => {
         setUser(currentUser(store, TOKEN_KEY))
@@ -27,6 +28,17 @@ export default function Root() {
       })
   }, [])
 
+  if (phase === 'insecure') {
+    const https = location.href.replace(/^http:/, 'https:')
+    return (
+      <div className="boot">
+        <p>
+          This demo needs a secure connection, because sign-in uses the browser's encryption features. Open the <a href={https}>https version of this page</a>.
+          If that doesn't load yet, the site's security certificate is still being set up; try again in a few minutes.
+        </p>
+      </div>
+    )
+  }
   if (phase === 'loading') return <div className="boot">Opening the database…</div>
   if (phase === 'error')
     return <div className="boot">The database couldn't be opened in this browser. Try a current version of Chrome, Edge, Firefox or Safari.</div>
