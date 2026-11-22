@@ -9,88 +9,35 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { AlertTriangle, ArrowDown, ArrowUp, Inbox, Mail, MessageSquare, PhoneMissed, RotateCcw, Send, Archive, FileText } from 'lucide-react'
-import { COMPANY, SEED_MESSAGES, TEAMS, type Channel, type InboundMessage, type Team } from './data'
-import {
-  classify,
-  DEFAULT_RULES,
-  draftReply,
-  route,
-  RULE_TESTS,
-  type Classification,
-  type Urgency,
-} from './classifier'
+import { AlertTriangle, ArrowDown, ArrowUp, Inbox, LogOut, Mail, MessageSquare, PhoneMissed, RotateCcw, Send, Archive, FileText } from 'lucide-react'
+import { COMPANY, TEAMS, type Channel, type InboundMessage, type Team } from './data'
+import { classify, draftReply, route, RULE_TESTS, type Classification, type Urgency } from './classifier'
+import { buildItem, loadDomain, permsFor, saveItems, saveRules, store, type Item, type Permissions, type RuleState, type Status, type Tab } from './repo'
+import { audit, recentAudit, type User } from './lib/auth'
 
-type Status = 'Needs review' | 'Sent' | 'Edited & sent' | 'Archived'
-
-interface Item {
-  msg: InboundMessage
-  cls: Classification
-  team: Team
-  ruleId: string | null
-  manualTeam: boolean
-  status: Status
-  draft: string
-  originalDraft: string
-  responseMinutes?: number
-}
-
-interface RuleState {
-  id: string
-  label: string
-  team: Team
-  enabled: boolean
-}
-
-const STORAGE_KEY = 'switchboard-demo-v1'
 const URGENCY_ORDER: Record<Urgency, number> = { Emergency: 0, High: 1, Normal: 2, Low: 3 }
-
-function buildItem(msg: InboundMessage, rules: RuleState[]): Item {
-  const cls = classify(msg)
-  const r = route(cls, rules)
-  const draft = draftReply(msg, cls)
-  return { msg, cls, team: r.team, ruleId: r.ruleId, manualTeam: false, status: r.team === 'Ignore' ? 'Archived' : 'Needs review', draft, originalDraft: draft }
-}
-
-function initialState(): { items: Item[]; rules: RuleState[] } {
-  const rules = DEFAULT_RULES.map((r) => ({ ...r, enabled: true }))
-  return { rules, items: SEED_MESSAGES.map((m) => buildItem(m, rules)) }
-}
-
-function loadState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw) return JSON.parse(raw) as { items: Item[]; rules: RuleState[] }
-  } catch {
-    /* storage unavailable */
-  }
-  return initialState()
-}
 
 const channelIcon = (c: Channel) =>
   c === 'Email' ? <Mail size={14} aria-hidden /> : c === 'SMS' ? <MessageSquare size={14} aria-hidden /> : c === 'Web form' ? <FileText size={14} aria-hidden /> : <PhoneMissed size={14} aria-hidden />
 
 const ago = (m: number) => (m < 60 ? `${m} min ago` : `${Math.floor(m / 60)} h ${m % 60} min ago`)
 
-type Tab = 'inbox' | 'insights' | 'rules' | 'try'
+const TAB_LABELS: Record<Tab, string> = { inbox: 'Inbox', insights: 'Insights', rules: 'Routing rules', try: 'Try a message' }
 
-export default function App() {
-  const [{ items, rules }, setState] = useState(loadState)
+export default function App({ user, onSignOut, onReset }: { user: User; onSignOut: () => void; onReset: () => void }) {
+  const perms = permsFor(user.role)
+  const visible = (i: Item) => perms.teams === 'all' || (perms.teams as Team[]).includes(i.team)
+  const [{ items, rules }, setState] = useState(loadDomain)
   const [tab, setTab] = useState<Tab>('inbox')
   const [selectedId, setSelectedId] = useState<string>(() => {
-    const open = loadState().items.filter((i) => i.status === 'Needs review')
+    const open = loadDomain().items.filter((i) => i.status === 'Needs review' && visible(i))
     return open.sort((a, b) => URGENCY_ORDER[a.cls.urgency] - URGENCY_ORDER[b.cls.urgency] || a.msg.receivedMinutesAgo - b.msg.receivedMinutesAgo)[0]?.msg.id ?? ''
   })
   const [teamFilter, setTeamFilter] = useState<Team | 'All open' | 'Done'>('All open')
   const [toast, setToast] = useState<string | null>(null)
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ items, rules }))
-    } catch {
-      /* ignore */
-    }
-  }, [items, rules])
+  useEffect(() => saveItems(items), [items])
+  useEffect(() => saveRules(rules), [rules])
 
   useEffect(() => {
     if (!toast) return
@@ -101,7 +48,8 @@ export default function App() {
   const updateItem = (id: string, patch: Partial<Item>) =>
     setState((s) => ({ ...s, items: s.items.map((i) => (i.msg.id === id ? { ...i, ...patch } : i)) }))
 
-  const setRules = (next: RuleState[]) =>
+  const setRules = (next: RuleState[], change: string) => {
+    audit(store, user.id, 'Changed routing rules', change)
     setState((s) => ({
       rules: next,
       items: s.items.map((i) => {
@@ -110,26 +58,23 @@ export default function App() {
         return { ...i, team: r.team, ruleId: r.ruleId }
       }),
     }))
-
-  const reset = () => {
-    const s = initialState()
-    setState(s)
-    setSelectedId('m08')
-    setTeamFilter('All open')
-    setToast('Demo data reset')
   }
 
   const addMessage = (msg: InboundMessage) => {
     const item = buildItem(msg, rules)
+    audit(store, user.id, 'Added a test message', `Routed to ${item.team}`)
     setState((s) => ({ ...s, items: [item, ...s.items] }))
-    setSelectedId(msg.id)
     setTeamFilter('All open')
     setTab('inbox')
-    setToast(`Added to inbox and routed to ${item.team}`)
+    if (visible(item)) {
+      setSelectedId(msg.id)
+      setToast(`Added to inbox and routed to ${item.team}`)
+    } else setToast(`Added and routed to ${item.team}, which is outside your queues`)
   }
 
-  const openCount = items.filter((i) => i.status === 'Needs review').length
-  const emergencies = items.filter((i) => i.status === 'Needs review' && i.cls.urgency === 'Emergency').length
+  const mine = items.filter(visible)
+  const openCount = mine.filter((i) => i.status === 'Needs review').length
+  const emergencies = mine.filter((i) => i.status === 'Needs review' && i.cls.urgency === 'Emergency').length
 
   return (
     <div className="app">
@@ -144,22 +89,26 @@ export default function App() {
           </div>
         </div>
         <nav className="tabs" aria-label="Sections">
-          {(
-            [
-              ['inbox', `Inbox (${openCount})`],
-              ['insights', 'Insights'],
-              ['rules', 'Routing rules'],
-              ['try', 'Try a message'],
-            ] as [Tab, string][]
-          ).map(([t, label]) => (
+          {perms.tabs.map((t) => (
             <button key={t} className={tab === t ? 'tab active' : 'tab'} aria-current={tab === t ? 'page' : undefined} onClick={() => setTab(t)}>
-              {label}
+              {t === 'inbox' ? `${TAB_LABELS[t]} (${openCount})` : TAB_LABELS[t]}
             </button>
           ))}
         </nav>
-        <button className="ghost small" onClick={reset} title="Restore the original sample messages">
-          <RotateCcw size={14} aria-hidden /> Reset demo
-        </button>
+        <div className="userbox">
+          <span className="who">
+            <strong>{user.name}</strong>
+            <span>{user.role}</span>
+          </span>
+          {perms.reset && (
+            <button className="ghost small" onClick={onReset} title="Delete the database and start again with the sample data">
+              <RotateCcw size={14} aria-hidden /> Reset demo
+            </button>
+          )}
+          <button className="ghost small" onClick={onSignOut}>
+            <LogOut size={14} aria-hidden /> Sign out
+          </button>
+        </div>
       </header>
 
       {emergencies > 0 && tab === 'inbox' && (
@@ -171,7 +120,9 @@ export default function App() {
       <main className="main">
         {tab === 'inbox' && (
           <InboxView
-            items={items}
+            items={mine}
+            perms={perms}
+            user={user}
             rules={rules}
             selectedId={selectedId}
             setSelectedId={setSelectedId}
@@ -181,13 +132,13 @@ export default function App() {
             onToast={setToast}
           />
         )}
-        {tab === 'insights' && <InsightsView items={items} />}
-        {tab === 'rules' && <RulesView rules={rules} setRules={setRules} items={items} />}
+        {tab === 'insights' && perms.tabs.includes('insights') && <InsightsView items={items} showActivity={perms.seeActivity} />}
+        {tab === 'rules' && perms.editRules && <RulesView rules={rules} setRules={setRules} items={items} />}
         {tab === 'try' && <TryView rules={rules} onAdd={addMessage} />}
       </main>
 
       <footer className="foot">
-        Demo with fictional data. Messages are classified by a rules model that runs in your browser, so nothing you type leaves this page. In production the same screen calls an LLM (OpenAI or Claude) and connects to the real inbox, phone system and CRM. Every reply still waits for a person to approve it.
+        Demo with fictional data. Users, sessions, messages, routing rules and the activity log live in a SQLite database that runs in your browser and is saved on this device, so nothing you type leaves this page. Messages are classified by a transparent rules model; in production the same screen calls an LLM (OpenAI or Claude), uses a hosted database and connects to the real inbox, phone system and CRM. Every reply still waits for a person to approve it.
       </footer>
 
       {toast && (
@@ -203,6 +154,8 @@ export default function App() {
 
 function InboxView(props: {
   items: Item[]
+  perms: Permissions
+  user: User
   rules: RuleState[]
   selectedId: string
   setSelectedId: (id: string) => void
@@ -211,7 +164,9 @@ function InboxView(props: {
   updateItem: (id: string, patch: Partial<Item>) => void
   onToast: (t: string) => void
 }) {
-  const { items, rules, selectedId, setSelectedId, teamFilter, setTeamFilter, updateItem, onToast } = props
+  const { items, perms, user, rules, selectedId, setSelectedId, teamFilter, setTeamFilter, updateItem, onToast } = props
+  const teamChips = (perms.teams === 'all' ? (['Dispatch', 'Sales', 'Billing', 'Customer care'] as Team[]) : perms.teams).filter((t) => t !== 'Ignore')
+  const chips: (Team | 'All open' | 'Done')[] = teamChips.length > 1 ? ['All open', ...teamChips, 'Done'] : ['All open', 'Done']
 
   const filtered = useMemo(() => {
     const list = items.filter((i) =>
@@ -233,7 +188,8 @@ function InboxView(props: {
   const handle = (item: Item, status: Status) => {
     const edited = item.draft.trim() !== item.originalDraft.trim()
     const finalStatus: Status = status === 'Sent' && edited ? 'Edited & sent' : status
-    updateItem(item.msg.id, { status: finalStatus, responseMinutes: item.msg.receivedMinutesAgo })
+    updateItem(item.msg.id, { status: finalStatus, responseMinutes: item.msg.receivedMinutesAgo, handledBy: user.name })
+    audit(store, user.id, finalStatus === 'Archived' ? 'Archived a message' : finalStatus === 'Edited & sent' ? 'Edited and sent a reply' : 'Sent a reply', `${item.msg.from === 'Unknown' ? item.msg.contact : item.msg.from}: ${item.cls.intent}`)
     onToast(finalStatus === 'Archived' ? 'Archived' : `Reply sent to ${item.msg.from === 'Unknown' ? item.msg.contact : item.msg.from}`)
     const next = filtered.find((i) => i.msg.id !== item.msg.id)
     if (next) setSelectedId(next.msg.id)
@@ -243,7 +199,7 @@ function InboxView(props: {
     <div className="inbox">
       <section className="queue" aria-label="Message queue">
         <div className="filters" role="group" aria-label="Filter by team">
-          {(['All open', 'Dispatch', 'Sales', 'Billing', 'Customer care', 'Done'] as const).map((f) => (
+          {chips.map((f) => (
             <button key={f} className={teamFilter === f ? 'chip on' : 'chip'} aria-pressed={teamFilter === f} onClick={() => setTeamFilter(f)}>
               {f}
               {f !== 'All open' && f !== 'Done' && <span className="count">{counts(f)}</span>}
@@ -311,6 +267,7 @@ function InboxView(props: {
                 disabled={selected.status !== 'Needs review'}
                 onChange={(e) => {
                   updateItem(selected.msg.id, { team: e.target.value as Team, manualTeam: true, ruleId: null })
+                  audit(store, user.id, 'Reassigned a message', `${selected.msg.from} to ${e.target.value}`)
                   onToast(`Reassigned to ${e.target.value}`)
                 }}
               >
@@ -352,6 +309,7 @@ function InboxView(props: {
             ) : (
               <div className="done-note">
                 {selected.status}
+                {selected.handledBy ? ` by ${selected.handledBy}` : ''}
                 <button className="link" onClick={() => updateItem(selected.msg.id, { status: 'Needs review' })}>
                   Move back to queue
                 </button>
@@ -432,7 +390,8 @@ function Analysis({ cls }: { cls: Classification }) {
 
 /* ---------------- Insights ---------------- */
 
-function InsightsView({ items }: { items: Item[] }) {
+function InsightsView({ items, showActivity }: { items: Item[]; showActivity: boolean }) {
+  const activity = showActivity ? recentAudit(store, 25) : []
   const handled = items.filter((i) => i.status === 'Sent' || i.status === 'Edited & sent')
   const unedited = handled.filter((i) => i.status === 'Sent').length
   const avgResp = handled.length ? Math.round(handled.reduce((a, i) => a + (i.responseMinutes ?? 0), 0) / handled.length) : null
@@ -523,6 +482,35 @@ function InsightsView({ items }: { items: Item[] }) {
           </table>
         </div>
       </section>
+
+      {showActivity && (
+        <section className="panel">
+          <h2 className="panel-title">Activity log</h2>
+          <p className="muted small">Every sign-in, reply, reassignment and rule change, read from the audit_log table.</p>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>When</th>
+                  <th>Who</th>
+                  <th>What</th>
+                  <th>Details</th>
+                </tr>
+              </thead>
+              <tbody>
+                {activity.map((a) => (
+                  <tr key={a.id}>
+                    <td className="nowrap">{new Date(a.at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</td>
+                    <td>{a.user_name ? `${a.user_name} (${a.user_role})` : 'Unknown user'}</td>
+                    <td>{a.action}</td>
+                    <td className="muted">{a.detail ?? ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
     </div>
   )
 }
@@ -538,12 +526,12 @@ function Stat({ label, value, tone }: { label: string; value: string | number; t
 
 /* ---------------- Rules ---------------- */
 
-function RulesView({ rules, setRules, items }: { rules: RuleState[]; setRules: (r: RuleState[]) => void; items: Item[] }) {
+function RulesView({ rules, setRules, items }: { rules: RuleState[]; setRules: (r: RuleState[], change: string) => void; items: Item[] }) {
   const move = (idx: number, dir: -1 | 1) => {
     const next = [...rules]
     const [r] = next.splice(idx, 1)
     next.splice(idx + dir, 0, r)
-    setRules(next)
+    setRules(next, `Moved "${r.label}" to position ${idx + dir + 1}`)
   }
   return (
     <div className="rules">
@@ -569,7 +557,7 @@ function RulesView({ rules, setRules, items }: { rules: RuleState[]; setRules: (
                 <span className="sr">Send to team</span>
                 <select
                   value={r.team}
-                  onChange={(e) => setRules(rules.map((x) => (x.id === r.id ? { ...x, team: e.target.value as Team } : x)))}
+                  onChange={(e) => setRules(rules.map((x) => (x.id === r.id ? { ...x, team: e.target.value as Team } : x)), `"${r.label}" now goes to ${e.target.value}`)}
                 >
                   {TEAMS.map((t) => (
                     <option key={t}>{t}</option>
@@ -580,7 +568,7 @@ function RulesView({ rules, setRules, items }: { rules: RuleState[]; setRules: (
                 <input
                   type="checkbox"
                   checked={r.enabled}
-                  onChange={(e) => setRules(rules.map((x) => (x.id === r.id ? { ...x, enabled: e.target.checked } : x)))}
+                  onChange={(e) => setRules(rules.map((x) => (x.id === r.id ? { ...x, enabled: e.target.checked } : x)), `"${r.label}" turned ${e.target.checked ? 'on' : 'off'}`)}
                 />
                 <span>{r.enabled ? 'On' : 'Off'}</span>
               </label>
